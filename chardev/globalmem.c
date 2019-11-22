@@ -179,7 +179,9 @@ module_init(globalmem_init);
 
 static void __exit globalmem_exit(void)
 {
-    printk(KERN_INFO "Hello world exit");
+    cdev_del(&globalmem_devp->cdev);
+    kfree(globalmem_devp);
+    unregister_chrdev_region(MKDEV(globalmem_major,0), 1);
 }
 module_exit(globalmem_exit);
 
