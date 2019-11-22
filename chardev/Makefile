@@ -1,6 +1,6 @@
 KVERS = $(shell uname -r)
 #Kernel Modules
-obj-m += hello.o
+obj-m += globalmem.o
 
 build:kernel_modules
 kernel_modules:
