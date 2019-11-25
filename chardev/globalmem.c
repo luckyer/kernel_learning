@@ -16,6 +16,7 @@ module_param(globalmem_major, int, S_IRUGO);
 struct globalmem_dev{
     struct cdev cdev;
     unsigned char mem[GLOBALMEM_SIZE];
+    struct mutex mutex;
 };
 struct globalmem_dev *globalmem_devp ;
 
@@ -28,6 +29,7 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
     //如果偏移越界则直接返回
     if (p >= GLOBALMEM_SIZE)
         return 0;
+    mutex_lock(&dev->mutex);
     //读取越界则只能获取当前缓存中的内容，越界的内容不予返回
     if (count > GLOBALMEM_SIZE -p)
         count = GLOBALMEM_SIZE - p;
@@ -39,6 +41,7 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
         
         printk(KERN_INFO "read %u bytes(s) from %lu\n", count, p);
     }
+    mutex_unlock(&dev->mutex);
     
     return ret ;
 }
@@ -55,14 +58,16 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
     if (count > GLOBALMEM_SIZE -p)
         count = GLOBALMEM_SIZE - p;
         
+    mutex_lock(&dev->mutex);
     if (copy_from_user(dev->mem + p, buf, count))
         ret = -EFAULT;
     else{
         *ppos += count;
         ret = count;
         
-        printk(KERN_INFO "written %u bytes(s) from %lu\n", count);
+        printk(KERN_INFO "written %u bytes(s) from \n", count);
     }
+    mutex_lock(&dev->mutex);
     return ret ;
 }
 
@@ -167,6 +172,8 @@ static int __init globalmem_init(void)
         ret = -ENOMEM;
         goto fail_malloc;
     }
+    //初始化互斥锁
+    mutex_init(&globalmem_devp->mutex);
     globalmem_setup_cdev(globalmem_devp, 0);
     return 0;
 
