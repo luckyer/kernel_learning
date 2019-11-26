@@ -4,11 +4,14 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/device.h>
 
 #define GLOBALMEM_SIZE  0x1000
 #define GLOBAL_MAGIC 'g'
 #define MEM_CLEAR       _IO(GLOBAL_MAGIC, 0)
-#define GLOBALMEM_MAJOR 230
+#define GLOBALMEM_MAJOR 230  //主设备号
+
+const char *device_name = "globalmem";
 
 static int globalmem_major = GLOBALMEM_MAJOR;
 module_param(globalmem_major, int, S_IRUGO);
@@ -22,6 +25,8 @@ struct globalmem_dev{
     wait_queue_head_t w_wait;  //write wait
 };
 struct globalmem_dev *globalmem_devp ;
+struct class *globalmem_class;
+struct device *globalmem_device;
 
 static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, loff_t *ppos)
 {
@@ -219,11 +224,11 @@ static int __init globalmem_init(void)
     dev_t devno = MKDEV(globalmem_major, 0);
     
     if (globalmem_major)
-        ret = register_chrdev_region(devno, 1, "globalmem");
+        ret = register_chrdev_region(devno, 1, device_name);
     else{
         //alloc_chrdev_region会自动分配空闲的设备号给当前设备节点，可以避免设备号冲突的问题
         //获取的设备号会存储在devno中，通过MAJOR可以获取到设备的主设备号
-        ret = alloc_chrdev_region(&devno, 0, 1, "globalmem");
+        ret = alloc_chrdev_region(&devno, 0, 1, device_name);
         globalmem_major = MAJOR(devno);
     }
     if (ret < 0)
@@ -240,8 +245,22 @@ static int __init globalmem_init(void)
     init_waitqueue_head(&globalmem_devp->r_wait);
     init_waitqueue_head(&globalmem_devp->w_wait);
     globalmem_setup_cdev(globalmem_devp, 0);
+    globalmem_class = class_create(THIS_MODULE, device_name);
+    if (NULL == globalmem_class){
+        ret = -EFAULT;
+        goto fail_create_class;
+    }
+    globalmem_device = device_create(globalmem_class, NULL, devno, NULL, device_name);
+    if (NULL == globalmem_device){
+        ret = -EFAULT;
+        goto fail_create_device;
+    }
+    
     return 0;
-
+fail_create_device:
+    class_destroy(globalmem_class);
+fail_create_class:
+    kfree(globalmem_devp);
 fail_malloc:
     unregister_chrdev_region(devno, 1);
     return ret ;
@@ -251,6 +270,8 @@ module_init(globalmem_init);
 
 static void __exit globalmem_exit(void)
 {
+    device_destroy(globalmem_class, MKDEV(globalmem_major, 0));
+    class_destroy(globalmem_class);
     cdev_del(&globalmem_devp->cdev);
     kfree(globalmem_devp);
     unregister_chrdev_region(MKDEV(globalmem_major,0), 1);
