@@ -93,9 +93,7 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
     int ret = 0;
     struct globalmem_dev *dev = filp->private_data;
     DECLARE_WAITQUEUE(wait, current);
-    
-    if (p > GLOBALMEM_SIZE)
-        return 0;
+
     if (count > GLOBALMEM_SIZE -p)
         count = GLOBALMEM_SIZE - p;
         
