@@ -15,8 +15,11 @@ module_param(globalmem_major, int, S_IRUGO);
 
 struct globalmem_dev{
     struct cdev cdev;
+    unsigned int current_len;
     unsigned char mem[GLOBALMEM_SIZE];
     struct mutex mutex;
+    wait_queue_head_t r_wait;  //read wait
+    wait_queue_head_t w_wait;  //write wait
 };
 struct globalmem_dev *globalmem_devp ;
 
@@ -26,24 +29,55 @@ static ssize_t globalmem_read(struct file *filp, char __user *buf, size_t size, 
     unsigned int count = size; //读取的大小
     int ret = 0;
     struct globalmem_dev *dev = filp->private_data;
+    //定义等待队列
+    DECLARE_WAITQUEUE(wait, current);
     //如果偏移越界则直接返回
     if (p >= GLOBALMEM_SIZE)
         return 0;
     mutex_lock(&dev->mutex);
-    //读取越界则只能获取当前缓存中的内容，越界的内容不予返回
-    if (count > GLOBALMEM_SIZE -p)
-        count = GLOBALMEM_SIZE - p;
-    if (copy_to_user(buf, dev->mem+p, count)){
-        ret = -EFAULT;
-    }else {
-        *ppos += count;
-        ret = count;
-        
-        printk(KERN_INFO "read %u bytes(s) from %lu\n", count, p);
+    add_wait_queue(&dev->r_wait, &wait);
+    while(dev->current_len == 0){
+        if (filp->f_flags & O_NONBLOCK){
+            ret = -EAGAIN;
+            goto out;
+        }
+        //手动休眠
+        __set_current_state(TASK_INTERRUPTIBLE);
+        mutex_unlock(&dev->mutex);
+        //进程调度
+        schedule();
+        //检查唤醒源是否为中断，如果是中断则返回-ERESTARTSYS
+        if (signal_pending(current)){
+            ret = -ERESTARTSYS;
+            goto out2;
+        }
+        mutex_lock(&dev->mutex);
     }
-    mutex_unlock(&dev->mutex);
     
-    return ret ;
+    //读取的最大长度不可超过当前内容的长度
+    if (count > dev->current_len)
+        count = dev->current_len;
+        
+    //copy_to_user成功会返回0，失败则会返回没有拷贝成功的字节数，和memcpy有很大区别
+    if (copy_to_user(buf, dev->mem, count)){
+        ret = -EFAULT;
+        goto out;
+    }else{
+        //从缓存中去掉已经读取掉的内容
+        memcpy(dev->mem, dev->mem + count, dev->current_len - count);
+        dev->current_len -= count;
+        printk(KERN_INFO "read %d bytes(s), current_len:%d \n", count, dev->current_len);
+        //唤醒可能被阻塞的写进程
+        wake_up_interruptible(&dev->w_wait);
+        
+        ret = count;
+    }
+out:
+    mutex_unlock(&dev->mutex);
+out2:
+    remove_wait_queue(&dev->r_wait, &wait);
+    set_current_state(TASK_RUNNING);
+    return ret;
 }
 
 static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t size, loff_t *ppos)
@@ -52,6 +86,7 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
     unsigned int count = size ;
     int ret = 0;
     struct globalmem_dev *dev = filp->private_data;
+    DECLARE_WAITQUEUE(wait, current);
     
     if (p > GLOBALMEM_SIZE)
         return 0;
@@ -59,16 +94,43 @@ static ssize_t globalmem_write(struct file *filp, const char __user *buf, size_t
         count = GLOBALMEM_SIZE - p;
         
     mutex_lock(&dev->mutex);
-    if (copy_from_user(dev->mem + p, buf, count))
-        ret = -EFAULT;
-    else{
-        *ppos += count;
-        ret = count;
-        
-        printk(KERN_INFO "written %u bytes(s) from \n", count);
+    add_wait_queue(&dev->w_wait, &wait);
+    while(dev->current_len == GLOBALMEM_SIZE){
+        if (filp->f_flags & O_NONBLOCK){
+            ret = -EAGAIN;
+            goto out;
+        }
+        __set_current_state(TASK_INTERRUPTIBLE);
+        mutex_unlock(&dev->mutex);
+        schedule();
+        if (signal_pending(current)){
+            ret = -ERESTARTSYS;
+            goto out2;
+        }
+        mutex_lock(&dev->mutex);
     }
-    mutex_lock(&dev->mutex);
-    return ret ;
+    if (count > GLOBALMEM_SIZE - dev->current_len){
+        count = GLOBALMEM_SIZE - dev->current_len;
+    }
+    
+    if (copy_from_user(dev->mem + dev->current_len, buf, count)){
+        ret = -EFAULT;
+        goto out;
+    }else{
+        dev->current_len += count;
+        printk(KERN_INFO "written %d bytes(s), current_len:%d \n", count, dev->current_len);
+        //唤醒可能被阻塞的读进程
+        wake_up_interruptible(&dev->r_wait);
+        
+        ret = count;
+    }
+    
+out:
+    mutex_unlock(&dev->mutex);
+out2:
+    remove_wait_queue(&dev->w_wait, &wait);
+    set_current_state(TASK_RUNNING);
+    return ret;
 }
 
 static loff_t globalmem_llseek(struct file *filp, loff_t offset, int orig)
@@ -174,6 +236,9 @@ static int __init globalmem_init(void)
     }
     //初始化互斥锁
     mutex_init(&globalmem_devp->mutex);
+    //初始化等待队列
+    init_waitqueue_head(&globalmem_devp->r_wait);
+    init_waitqueue_head(&globalmem_devp->w_wait);
     globalmem_setup_cdev(globalmem_devp, 0);
     return 0;
 
