@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/device.h>
+#include <linux/poll.h>
 
 #define GLOBALMEM_SIZE  0x1000
 #define GLOBAL_MAGIC 'g'
@@ -198,14 +199,41 @@ static int globalmem_release(struct inode *inode, struct file *filp)
     return 0;
 }
 
+static unsigned int globalmem_poll(struct file *filp, poll_table *wait)
+{
+    unsigned int mask = 0;
+    struct globalmem_dev *dev = filp->private_data;
+    
+    mutex_lock(&dev->mutex);
+    //将读等待队列和写等待队列的唤醒加入poll的唤醒中，意味着当程序因为select阻塞的时候可以被
+    //r_wait和w_wait唤醒， 也就是可读可写的时候
+    poll_wait(filp, &dev->r_wait, wait);
+    poll_wait(filp, &dev->w_wait, wait);
+    
+    //当缓存非空的时候可读
+    //POLLRDNORM:普通数据可读
+    if (dev->current_len != 0){
+        mask |= POLLIN | POLLRDNORM;
+    }
+    //当缓存未满的时候可写
+    //POLLWRNORM:普通数据可写
+    if (dev->current_len != GLOBALMEM_SIZE){
+        mask |= POLLOUT | POLLWRNORM;
+    }
+    mutex_unlock(&dev->mutex);
+    
+    return mask;
+}
+
 static const struct file_operations globalmem_fops = {
-    .owner = THIS_MODULE,
-    .llseek = globalmem_llseek,
-    .read = globalmem_read,
-    .write = globalmem_write,
-    .unlocked_ioctl = globalmem_ioctl,
-    .open = globalmem_open,
-    .release = globalmem_release,
+    .owner           = THIS_MODULE,
+    .llseek          = globalmem_llseek,
+    .read            = globalmem_read,
+    .write           = globalmem_write,
+    .unlocked_ioctl  = globalmem_ioctl,
+    .open            = globalmem_open,
+    .release         = globalmem_release,
+    .poll            = globalmem_poll,
 };
 
 static void globalmem_setup_cdev(struct globalmem_dev *dev, int index)
@@ -265,7 +293,6 @@ fail_malloc:
     unregister_chrdev_region(devno, 1);
     return ret ;
 }
-
 module_init(globalmem_init);
 
 static void __exit globalmem_exit(void)
